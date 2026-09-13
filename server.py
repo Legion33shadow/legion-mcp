@@ -91,7 +91,19 @@ def scan_n8n(target: str) -> str:
     return r.text
 
 def main():
-    mcp.run(transport="stdio")
+    if os.environ.get("MCP_TRANSPORT") == "http":
+        host, port = "127.0.0.1", int(os.environ.get("MCP_PORT", "8802"))
+        try:
+            from mcp.server.transport_security import TransportSecuritySettings
+            ts = TransportSecuritySettings(enable_dns_rebinding_protection=True,
+                 allowed_hosts=["mcp.legion-api.com", "127.0.0.1:8802", "localhost:8802"],
+                 allowed_origins=["https://mcp.legion-api.com", "https://smithery.ai", "https://*.smithery.ai"])
+            mcp.run(transport="streamable-http", host=host, port=port, stateless_http=True, transport_security=ts)
+        except TypeError:
+            import uvicorn
+            uvicorn.run(mcp.streamable_http_app(), host=host, port=port, log_level="warning")
+    else:
+        mcp.run(transport="stdio")
 
 if __name__ == "__main__":
     main()
