@@ -1,0 +1,11 @@
+*.db
+*.env
+.env*
+*.log
+*.bak
+__pycache__/
+*.pyc
+.ghostsnowball_config
+*.tar.gz
+node_modules/
+.DS_Store

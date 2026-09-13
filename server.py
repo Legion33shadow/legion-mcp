@@ -1,9 +1,10 @@
+import os
 from mcp.server.mcpserver import MCPServer as FastMCP
 import requests
 
 mcp = FastMCP("Legion AI Intelligence")
 
-BASE = "http://localhost:8800"
+BASE = os.environ.get("LEGION_API_URL", "https://api.legion-api.com")
 
 @mcp.tool()
 def get_ai_incidents(type: str = "", severity: str = "", limit: int = 5) -> str:
@@ -89,5 +90,8 @@ def scan_n8n(target: str) -> str:
     r = requests.get(f"{BASE}/scan", params={"target": target}, timeout=15)
     return r.text
 
-if __name__ == "__main__":
+def main():
     mcp.run(transport="stdio")
+
+if __name__ == "__main__":
+    main()

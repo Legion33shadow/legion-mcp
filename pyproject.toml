@@ -1,0 +1,11 @@
+[project]
+name = "legion-mcp"
+version = "0.1.0"
+description = "MCP server: AI security incidents, model & GPU pricing, provider status"
+requires-python = ">=3.10"
+dependencies = ["mcp==2.1.1", "requests>=2.31"]
+[project.scripts]
+legion-mcp = "server:main"
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

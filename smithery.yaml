@@ -1,0 +1,16 @@
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      apiUrl:
+        type: string
+        default: "https://api.legion-api.com"
+        description: "Legion API base URL"
+    required: []
+  commandFunction: |-
+    (config) => ({
+      command: "python3",
+      args: ["server.py"],
+      env: { LEGION_API_URL: config.apiUrl || "https://api.legion-api.com" }
+    })

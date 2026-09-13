@@ -33,3 +33,11 @@ Add to claude_desktop_config.json:
 - RapidAPI: https://rapidapi.com/gemmozero/api/legion-ai-security-incidents
 - Datasets: https://huggingface.co/gemmozero
 - Site: https://legion-api.com
+
+## Cursor / Claude Code / Windsurf
+
+```json
+{ "mcpServers": { "legion-ai": { "command": "uvx", "args": ["--from", "git+https://github.com/Legion33shadow/legion-mcp", "legion-mcp"] } } }
+```
+
+No API key required. Free tier: 10 results per call. Full access: https://gemmo.gumroad.com/l/ngtmw
