@@ -105,5 +105,11 @@ def main():
     else:
         mcp.run(transport="stdio")
 
+@mcp.tool()
+def get_gpu_decision(gpu: str = "H100", hours_per_day: float = 8, budget: float = 0) -> str:
+    """Get a BUY/WAIT/AVOID decision for GPU rental based on real-time pricing, security incidents, provider status, and policy changes."""
+    r = requests.get(f"{BASE}/decide", params={"gpu": gpu, "hours_per_day": hours_per_day, "budget": budget}, timeout=15)
+    return r.text
+
 if __name__ == "__main__":
     main()
