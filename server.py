@@ -111,5 +111,14 @@ def get_gpu_decision(gpu: str = "H100", hours_per_day: float = 8, budget: float 
     r = requests.get(f"{BASE}/decide", params={"gpu": gpu, "hours_per_day": hours_per_day, "budget": budget}, timeout=15)
     return r.text
 
+@mcp.tool()
+def get_risk_assessment(provider: str = "", framework: str = "") -> str:
+    """Get aggregated risk assessment for an AI provider or framework from LEGION signals (incidents, policy drift, pricing)."""
+    params = {}
+    if provider: params["provider"] = provider
+    if framework: params["framework"] = framework
+    r = requests.get(f"{BASE}/risk", params=params, timeout=15)
+    return r.text
+
 if __name__ == "__main__":
     main()
