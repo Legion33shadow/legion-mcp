@@ -1,0 +1,11 @@
+name: guard-selftest
+on: { schedule: [{ cron: '0 8 * * *' }], workflow_dispatch: {} }
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: g
+        uses: ./.github/actions/guard
+        with: { providers: 'openai,anthropic', fail_on: 'never' }
+      - run: echo "verdict=${{ steps.g.outputs.verdict }}"

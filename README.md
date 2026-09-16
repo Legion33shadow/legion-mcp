@@ -41,3 +41,17 @@ Add to claude_desktop_config.json:
 ```
 
 No API key required. Free tier: 10 results per call. Full access: https://gemmo.gumroad.com/l/ngtmw
+
+
+## GitHub Action — Legion Guard
+
+Fail a CI/deploy job if a provider you depend on had a critical incident or a substantive ToS change since the last run:
+
+```yaml
+- uses: Legion33shadow/legion-mcp/.github/actions/guard@main
+  with:
+    providers: openai,anthropic
+    fail_on: HOLD
+```
+
+No key required. Output `verdict`. Data: https://api.legion-api.com/guard
