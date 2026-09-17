@@ -120,5 +120,36 @@ def get_risk_assessment(provider: str = "", framework: str = "") -> str:
     r = requests.get(f"{BASE}/risk", params=params, timeout=15)
     return r.text
 
+
+@mcp.tool()
+def get_oracle(limit: int = 5) -> str:
+    """Get AI pricing forecasts based on cross-signal analysis (incidents + funding + pricing history)."""
+    r = requests.get(f"{BASE}/oracle", params={"limit": limit}, timeout=15)
+    return r.text
+
+@mcp.tool()
+def get_sentinel(providers: str = "openai.com,anthropic.com") -> str:
+    """Monitor DNS/IP changes for AI providers. Detects infrastructure migrations."""
+    r = requests.get(f"{BASE}/sentinel", params={"providers": providers}, timeout=15)
+    return r.text
+
+@mcp.tool()
+def get_autopsy(company: str = "openai") -> str:
+    """Cross-reference incident with all LEGION signals for automated post-mortem analysis."""
+    r = requests.get(f"{BASE}/autopsy", params={"company": company}, timeout=15)
+    return r.text
+
+@mcp.tool()
+def nexus_search(q: str = "", limit: int = 10) -> str:
+    """Universal search across 7 LEGION databases: incidents, models, research, CVE, GitHub, arxiv, events."""
+    r = requests.get(f"{BASE}/nexus", params={"q": q, "limit": limit}, timeout=15)
+    return r.text
+
+@mcp.tool()
+def get_attest(subject: str = "openai", days: int = 30) -> str:
+    """Get signed attestation of absence/presence of critical incidents for any AI provider."""
+    r = requests.get(f"{BASE}/attest", params={"subject": subject, "days": days}, timeout=15)
+    return r.text
+
 if __name__ == "__main__":
     main()
