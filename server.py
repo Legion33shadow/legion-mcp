@@ -177,55 +177,55 @@ if __name__ == "__main__":
 async def swarm_vote(question: str) -> dict:
     """Ask LEGION swarm (5 agents) to vote collectively on a security/risk question."""
     import httpx
-    r = httpx.get(f"https://api.legion-api.com/swarm", timeout=15)
+    r = httpx.get(f"{BASE}/swarm", timeout=15)
     return r.json()
 
 @mcp.tool()
 async def get_predictions(domain: str = "", min_confidence: float = 0.7) -> dict:
     """Get ORACLE PRIME autonomous predictions with Ed25519 signatures."""
     import httpx
-    r = httpx.get(f"https://api.legion-api.com/predictions?domain={domain}&min_confidence={min_confidence}&limit=5", timeout=15)
+    r = httpx.get(f"{BASE}/predictions?domain={domain}&min_confidence={min_confidence}&limit=5", timeout=15)
     return r.json()
 
 @mcp.tool()
 async def inference_frontier(input_tokens: int = 1000000, output_tokens: int = 500000) -> dict:
     """Get Pareto-optimal AI providers for given token volume. Real prices + live latency."""
     import httpx
-    r = httpx.get(f"https://api.legion-api.com/inference-frontier?input_tokens={input_tokens}&output_tokens={output_tokens}&pareto_only=1&limit=5", timeout=15)
+    r = httpx.get(f"{BASE}/inference-frontier?input_tokens={input_tokens}&output_tokens={output_tokens}&pareto_only=1&limit=5", timeout=15)
     return r.json()
 
 @mcp.tool()
 async def get_sentinel_anomalies(severity: str = "HIGH") -> dict:
     """Get anomalies detected by SENTINEL PRIME — unexpected changes in AI ecosystem."""
     import httpx
-    r = httpx.get(f"https://api.legion-api.com/sentinel?severity={severity}&limit=10", timeout=15)
+    r = httpx.get(f"{BASE}/sentinel?severity={severity}&limit=10", timeout=15)
     return r.json()
 
 @mcp.tool()
 async def get_memory(keyword: str = "", category: str = "") -> dict:
     """Query LEGION institutional memory — what happened, when, why."""
     import httpx
-    r = httpx.get(f"https://api.legion-api.com/memory?keyword={keyword}&category={category}&limit=10", timeout=15)
+    r = httpx.get(f"{BASE}/memory?keyword={keyword}&category={category}&limit=10", timeout=15)
     return r.json()
 
 @mcp.tool()
 async def get_convergence(entity: str = "") -> dict:
     """Cross-domain intelligence signals — incidents x lobbying x water x talent x carbon."""
     import httpx
-    r = httpx.get(f"https://api.legion-api.com/convergence?entity={entity}&limit=10", timeout=15)
+    r = httpx.get(f"{BASE}/convergence?entity={entity}&limit=10", timeout=15)
     return r.json()
 
 @mcp.tool()
 async def check_phantom(company: str) -> dict:
     """Check if a company has a history of AI vaporware — announced but undelivered."""
     import httpx
-    r = httpx.get(f"https://api.legion-api.com/phantom?company={company}&limit=5", timeout=15)
+    r = httpx.get(f"{BASE}/phantom?company={company}&limit=5", timeout=15)
     return r.json()
 
 @mcp.tool()
 async def get_entity_score(entity: str) -> dict:
     """Composite trustworthiness score for any AI entity — immunity + trust + incidents + lobbying."""
     import httpx
-    r = httpx.get(f"https://api.legion-api.com/score/{entity}", timeout=15)
+    r = httpx.get(f"{BASE}/score/{entity}", timeout=15)
     return r.json()
 
