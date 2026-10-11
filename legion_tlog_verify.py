@@ -22,6 +22,7 @@ import argparse
 import base64
 import hashlib
 import json
+import struct
 import sys
 
 # ---------- décodage STRICT (durcissement) : un texte unique accepté par valeur binaire ----------
@@ -47,6 +48,7 @@ def _b64(s):
 
 
 RECORD_SCHEMA = "legion-mcp-tlog-record/0.1"
+CORRECTION_SCHEMA = "legion-mcp-tlog-correction/0.1"
 STH_SCHEMA = "legion-mcp-tlog-sth/0.1"
 
 
@@ -182,8 +184,14 @@ def node_hash(l, r):
     return H(b"\x01" + l + r)
 
 
+def _hash32(*xs):
+    return all(isinstance(x, (bytes, bytearray)) and len(x) == 32 for x in xs)
+
+
 def verify_inclusion(leaf, index, size, path, root):
     if index < 0 or index >= size:
+        return False
+    if not _hash32(leaf, root) or not all(_hash32(p) for p in path):   # RFC 9162 : hachages de 32 octets exactement
         return False
     fn, sn, r = index, size - 1, leaf
     for p in path:
@@ -242,7 +250,7 @@ def load_keyring(text, root_pub_b64):
     par la racine (endorsement_sig) ; key_register exige en plus la preuve de possession (self_sig). key_revoke retire
     la clé. Toute anomalie lève une exception : le keyring entier est alors refusé."""
     root_pin = key_pin(root_pub_b64)
-    keys, revoked, prev = {}, set(), None
+    keys, revoked, prev, limits, compromised = {}, set(), None, {}, set()
     for n, line in enumerate(l for l in text.splitlines() if l.strip()):
         e = json.loads(line)
         body = {k: v for k, v in e.items() if k not in KEYRING_SIG_FIELDS}
@@ -264,23 +272,49 @@ def load_keyring(text, root_pub_b64):
             keys[key_pin(pub)] = pub
         elif e.get("type") == "key_revoke":
             revoked.add(e["key_id"])
+            if isinstance(e.get("valid_until_tree_size"), int) and e["key_id"] not in compromised:
+                limits[e["key_id"]] = min(e["valid_until_tree_size"], limits.get(e["key_id"], e["valid_until_tree_size"]))
+            elif not isinstance(e.get("valid_until_tree_size"), int):   # compromission : l'emporte sur toute retraite
+                limits.pop(e["key_id"], None)
+                compromised.add(e["key_id"])
         else:
             raise ValueError("keyring : type inconnu à l'entrée %d" % n)
         prev = e["hash"]
-    return {p: k for p, k in keys.items() if "k1:" + p[:32] not in revoked}
+    out = _Keys({p: k for p, k in keys.items() if "k1:" + p[:32] not in revoked or "k1:" + p[:32] in limits})
+    out.limits = {p: limits["k1:" + p[:32]] for p in keys if "k1:" + p[:32] in limits}
+    return out
+
+
+class _Keys(dict):
+    """{pin: clé publique} + limits {pin: N} pour les sous-clés retirées (valides seulement avant la taille N)."""
+    limits = {}
+
+
+def _within(keys, pin, leaf_index=None, tree_size=None):
+    lim = getattr(keys, "limits", {}).get(pin)
+    if lim is None:
+        return True
+    return (leaf_index is not None and leaf_index < lim) or (tree_size is not None and tree_size <= lim)
 
 
 def check_record(rec, pub_b64):
     """Intégrité interne + signature. Renvoie (intégrité, signature, détail)."""
     try:
         body = {k: v for k, v in rec.items() if k != "signature_ed25519"}
-        fp = rec["tools_fingerprint"]
-        names = [n for n, _ in fp["per_tool_sha256"]]
-        integ = (rec.get("schema") == RECORD_SCHEMA and fp["tool_count"] == len(names)
-                 and names == sorted(names) and len(set(names)) == len(names)
-                 and isinstance(rec["server_id"], str) and isinstance(rec["observed_at"], str))
+        if rec.get("schema") == CORRECTION_SCHEMA:   # feuille de correction : référence une feuille antérieure
+            integ = (rec.get("kind") == "canonicalization_artifact" and isinstance(rec.get("corrects_leaf_index"), int)
+                     and 0 <= rec["corrects_leaf_index"] < rec["leaf_index"] and isinstance(rec["server_id"], str)
+                     and isinstance(rec["observed_at"], str) and rec.get("artifact") in ("array_order", "number_format"))
+        else:
+            fp = rec["tools_fingerprint"]
+            names = [n for n, _ in fp["per_tool_sha256"]]
+            integ = (rec.get("schema") == RECORD_SCHEMA and fp["tool_count"] == len(names)
+                     and names == sorted(names) and len(set(names)) == len(names)
+                     and isinstance(rec["server_id"], str) and isinstance(rec["observed_at"], str))
+        keys_ = pub_b64
         pub_b64 = _pub(pub_b64, rec.get("key_id"))
         sig_ok = (bool(pub_b64) and rec.get("key_id") == key_pin(pub_b64)
+                  and (not isinstance(keys_, dict) or _within(keys_, rec.get("key_id"), leaf_index=rec.get("leaf_index")))
                   and ed25519_ok(_b64(pub_b64), _b64(rec["signature_ed25519"]), canon(body)))
         return integ, sig_ok, None
     except Exception as e:
@@ -290,7 +324,10 @@ def check_record(rec, pub_b64):
 def check_sth(sth, pub_b64):
     try:
         head = sth["tree_head"]
+        keys_ = pub_b64
         pub_b64 = _pub(pub_b64, head.get("issuer_pin_sha256"))
+        if isinstance(keys_, dict) and not _within(keys_, head.get("issuer_pin_sha256"), tree_size=head.get("tree_size")):
+            return False
         return (bool(pub_b64) and head.get("schema") == STH_SCHEMA and head.get("issuer_pin_sha256") == key_pin(pub_b64)
                 and ed25519_ok(_b64(pub_b64), _b64(sth["signature_ed25519"]), canon(head)))
     except Exception:
@@ -722,6 +759,10 @@ def _verify_freeze_impl(d, pub_b64, headers=None, require_anchor=True):
 
 
 def _verify_consistency(m, n, old_root, new_root, proof):
+    if m <= 0:   # taille 0 : aucune tête signée possible (comme la référence transparency-dev)
+        return False
+    if m != n and (not _hash32(old_root, new_root) or not all(_hash32(p) for p in proof)):
+        return False
     if m == n:
         return old_root == new_root and not proof
     if m == 0 or m > n:
@@ -846,6 +887,90 @@ def fetch_and_verify(leaf, pin=ROOT_PIN, base=DEFAULT_BASE, outdir=None, pubkey_
     return res
 
 
+
+# ---------- vérifications 100 % hors ligne (aucun appel réseau) ----------
+def verify_consistency_offline(old_sth, new_sth, proof, keys):
+    """Deux têtes signées + preuve RFC 9162 : signatures des deux têtes (keyring) et cohérence append-only."""
+    o, n = old_sth["tree_head"], new_sth["tree_head"]
+    out = {"old_head_signature": check_sth(old_sth, keys), "new_head_signature": check_sth(new_sth, keys),
+           "old_size": o["tree_size"], "new_size": n["tree_size"]}
+    p = proof.get("proof", proof) if isinstance(proof, dict) else proof
+    out["consistent"] = _verify_consistency(o["tree_size"], n["tree_size"], _hx(o["root_sha256"]), _hx(n["root_sha256"]), [_hx(h) for h in p])
+    out["ok"] = out["old_head_signature"] and out["new_head_signature"] and out["consistent"]
+    return out
+
+
+def verify_bundle_offline(bundle, keys, anchored_sth=None, anchor_consistency=None, ots=None, headers=None):
+    """Bundle /tlog/v1/servers/{id}/latest : signature de l'enregistrement, inclusion dans la tête, signature de la tête.
+    Option ancrage : tête ancrée (sth) + son .ots + en-têtes Bitcoin (votre nœud ou explorateur) + preuve de cohérence
+    tête ancrée -> tête du bundle. Sans ces fichiers, l'ancrage est déclaré non vérifié (jamais supposé)."""
+    rec, sth = bundle["record"], bundle["sth"]
+    integ, sig, err = check_record(rec, keys)
+    out = {"server_id": rec.get("server_id"), "leaf_index": rec.get("leaf_index"), "tree_size": sth["tree_head"]["tree_size"],
+           "record_integrity": integ, "record_signature": sig, "head_signature": check_sth(sth, keys),
+           "inclusion": check_inclusion(rec, bundle["inclusion"], sth), "error": err}
+    out["ok"] = bool(integ and sig and out["head_signature"] and out["inclusion"])
+    if anchored_sth is not None:
+        a = verify_consistency_offline(anchored_sth, sth, anchor_consistency or [], keys) if anchored_sth["tree_head"]["tree_size"] != sth["tree_head"]["tree_size"] \
+            else {"ok": anchored_sth == sth, "consistent": anchored_sth == sth}
+        out["anchored_head"] = anchored_sth["tree_head"]["tree_size"]
+        out["anchored_head_extends_to_bundle_head"] = bool(a.get("ok"))
+        if ots is not None:
+            st = check_ots(ots, canon(anchored_sth["tree_head"]), headers)
+            out["anchor"] = st
+        else:
+            out["anchor"] = {"status": "not_checked", "reason": "no .ots given"}
+    else:
+        out["anchor"] = {"status": "not_checked", "reason": "no anchored head given"}
+    return out
+
+
+# ---------- tête contresignée par N témoins (C2SP signed-note + tlog-cosignature) ----------
+def _vkey(v):
+    name, kid_hex, b64 = v.strip().split("+", 2)
+    raw = base64.b64decode(b64)
+    return name, bytes.fromhex(kid_hex), raw[0], raw[1:]
+
+
+def verify_witnessed(note_text, log_vkey, witness_vkeys, n_required):
+    """La note est signée par la clé du journal (log_vkey) ET contresignée (cosignature/v1) par au moins n_required clés
+    parmi witness_vkeys, la liste des témoins que VOUS jugez indépendants. Clé inconnue : ignorée. Clé connue qui échoue :
+    rejet (règle C2SP signed-note). Renvoie le détail."""
+    out = {"ok": False, "log_signature": False, "witnesses_valid": [], "required": n_required}
+    try:
+        body, rest = note_text.split("\n\n", 1)
+        body += "\n"
+        lines = [l for l in rest.split("\n") if l.strip()]
+        lname, lkid, ltype, lpub = _vkey(log_vkey)
+        ws = {}
+        for v in witness_vkeys:
+            n, k, t, p = _vkey(v)
+            if t == 0x04:
+                ws[n] = (k, p)
+        H_ = lambda b: hashlib.sha256(b).digest()
+        for l in lines:
+            if not l.startswith("\u2014 "):
+                return dict(out, error="ligne de signature malformée")
+            name, b64 = l[2:].rsplit(" ", 1)
+            raw = base64.b64decode(b64, validate=True)
+            if name == lname and raw[:4] == lkid and ltype == 0x01:
+                out["log_signature"] = ed25519_ok(lpub, raw[4:], body.encode())
+            elif name in ws:
+                k, p = ws[name]
+                if raw[:4] != k or len(raw) != 76 or H_(name.encode() + b"\n" + b"\x04" + p)[:4] != k:
+                    return dict(out, error="cosignature du témoin connu %s : identifiant de clé incohérent" % name)
+                ts = struct.unpack(">Q", raw[4:12])[0]
+                if not ed25519_ok(p, raw[12:], ("cosignature/v1\ntime %d\n" % ts).encode() + body.encode()):
+                    return dict(out, error="cosignature invalide du témoin connu %s" % name)
+                out["witnesses_valid"].append(name)
+        lines0 = body.split("\n")
+        out.update(origin=lines0[0], tree_size=int(lines0[1]), root_sha256=base64.b64decode(lines0[2]).hex())
+        out["witnesses_valid"] = sorted(set(out["witnesses_valid"]))
+        out["ok"] = out["log_signature"] and len(out["witnesses_valid"]) >= n_required
+    except Exception as e:
+        out["error"] = "%s: %s" % (type(e).__name__, e)
+    return out
+
 def main():
     ld = lambda p: json.load(open(p, encoding="utf-8")) if p else None
     if len(sys.argv) > 1 and sys.argv[1] == "fetch":
@@ -869,6 +994,42 @@ def main():
             print("RESULTAT: ERREUR_RESEAU")
             return 3
         print(json.dumps(res, indent=1, ensure_ascii=False, sort_keys=True))
+        print("RESULTAT:", "VALIDE" if res.get("ok") else "INVALIDE")
+        return 0 if res.get("ok") else 1
+    if len(sys.argv) > 1 and sys.argv[1] == "witnessed":
+        ap = argparse.ArgumentParser(prog="verify_tlog.py witnessed", description="Tête signée par le journal ET contresignée par >= N témoins de VOTRE liste (hors ligne).")
+        ap.add_argument("note", help="note C2SP (ex. /tlog/v1/checkpoint/<taille>)")
+        ap.add_argument("--log-vkey", required=True, help="clé du journal au format vkey (log_vkey de /tlog/v1/witnesses, à épingler)")
+        ap.add_argument("--witness-vkeys", required=True, help="fichier : une vkey de témoin par ligne, ceux que VOUS jugez indépendants")
+        ap.add_argument("--min", type=int, default=1)
+        a = ap.parse_args(sys.argv[2:])
+        res = verify_witnessed(open(a.note, encoding="utf-8").read(), a.log_vkey,
+                               [l for l in open(a.witness_vkeys) if l.strip() and not l.startswith("#")], a.min)
+        print(json.dumps(res, indent=1, ensure_ascii=False, sort_keys=True)); print("RESULTAT:", "VALIDE" if res["ok"] else "INVALIDE")
+        return 0 if res["ok"] else 1
+    if len(sys.argv) > 1 and sys.argv[1] in ("consistency", "bundle"):
+        sub = sys.argv[1]
+        ap = argparse.ArgumentParser(prog="verify_tlog.py " + sub, description="Vérification 100 % hors ligne (aucun appel réseau).")
+        ap.add_argument("--pubkey", required=True, help="clé racine LEGION (base64) ; son empreinte doit valoir --pin")
+        ap.add_argument("--pin", default=ROOT_PIN)
+        ap.add_argument("--keyring", required=True, help="keyring.jsonl (sous-clés approuvées par la racine)")
+        if sub == "consistency":
+            ap.add_argument("--old", required=True); ap.add_argument("--new", required=True); ap.add_argument("--proof", required=True)
+        else:
+            ap.add_argument("bundle"); ap.add_argument("--anchored-sth"); ap.add_argument("--anchor-consistency")
+            ap.add_argument("--ots"); ap.add_argument("--btc-headers")
+        a = ap.parse_args(sys.argv[2:])
+        root = open(a.pubkey).read().strip()
+        if key_pin(root) != a.pin:
+            print(json.dumps({"ok": False, "error": "clé racine : empreinte %s != épinglée %s" % (key_pin(root), a.pin)})); print("RESULTAT: INVALIDE"); return 1
+        keys = load_keyring(open(a.keyring, encoding="utf-8").read(), root)
+        if sub == "consistency":
+            res = verify_consistency_offline(ld(a.old).get("sth", ld(a.old)), ld(a.new).get("sth", ld(a.new)), ld(a.proof), keys)
+        else:
+            an = ld(a.anchored_sth); an = an.get("sth", an) if an else None
+            ac = ld(a.anchor_consistency); ac = ac.get("proof", ac) if isinstance(ac, dict) else ac
+            res = verify_bundle_offline(ld(a.bundle), keys, an, ac, open(a.ots, "rb").read() if a.ots else None, ld(a.btc_headers))
+        print(json.dumps(res, indent=1, ensure_ascii=False, sort_keys=True, default=str))
         print("RESULTAT:", "VALIDE" if res.get("ok") else "INVALIDE")
         return 0 if res.get("ok") else 1
     if len(sys.argv) > 1 and sys.argv[1] == "alert":
