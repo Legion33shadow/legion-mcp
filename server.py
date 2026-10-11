@@ -11,11 +11,15 @@ du journal public sont lues (LEGION_TLOG_BASE). Transport : stdio par défaut ; 
 import json
 import os
 import re
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
+from pydantic import StrictInt, StrictStr
 
 import legion_tlog_verify as T
 
@@ -27,8 +31,13 @@ MAX_LIMIT = 50
 MAX_BUNDLE_BYTES = 256 * 1024
 MAX_FETCH_BYTES = 2 * 1024 * 1024
 UA = "legion-verify-mcp/0.1"
+CACHE_TTL = 30            # s : trousseau + tête signée partagés entre appels (évite les 429 du limiteur du journal)
+_CACHE, _LOCK = {}, threading.Lock()
 
-mcp = MCPServer("LEGION Verify")
+mcp = MCPServer("LEGION Verify", version="1.1.0")
+# Les 3 outils sont en LECTURE SEULE : aucun n'écrit, n'achète, ne scanne ni ne récupère une URL fournie par l'appelant.
+READ_NET = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True)
+READ_OFFLINE = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
 
 
 class ToolFail(Exception):
@@ -41,18 +50,32 @@ def _err(code, message):
     return {"ok": False, "error": {"code": code, "message": message}}
 
 
-def _get(path, params=None):
-    """GET sur une route FIXE du journal public. Jamais d'URL fournie par l'appelant."""
+def _get(path, params=None, cache=False):
+    """GET sur une route FIXE du journal public. Jamais d'URL fournie par l'appelant.
+    cache=True (trousseau, tête) : réponse réutilisée CACHE_TTL s ; la vérification reste faite à chaque appel."""
     url = BASE + path + ("?" + urllib.parse.urlencode(params) if params else "")
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=20) as r:
-            data = r.read(MAX_FETCH_BYTES + 1)
-    except urllib.error.HTTPError as e:
-        raise ToolFail("NOT_FOUND" if e.code == 404 else "UPSTREAM_HTTP_%d" % e.code, "journal : HTTP %d sur %s" % (e.code, path))
-    except Exception as e:
-        raise ToolFail("UPSTREAM_UNREACHABLE", "journal injoignable (%s)" % type(e).__name__)
+    if cache:
+        with _LOCK:
+            hit = _CACHE.get(url)
+            if hit and time.monotonic() - hit[0] < CACHE_TTL:
+                return hit[1]
+    for attempt in (0, 1):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=20) as r:
+                data = r.read(MAX_FETCH_BYTES + 1)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt == 0:
+                time.sleep(min(float(e.headers.get("Retry-After") or 2), 5))
+                continue
+            raise ToolFail("NOT_FOUND" if e.code == 404 else "UPSTREAM_HTTP_%d" % e.code, "journal : HTTP %d sur %s" % (e.code, path))
+        except Exception as e:
+            raise ToolFail("UPSTREAM_UNREACHABLE", "journal injoignable (%s)" % type(e).__name__)
     if len(data) > MAX_FETCH_BYTES:
         raise ToolFail("UPSTREAM_TOO_LARGE", "réponse du journal trop grande")
+    if cache:
+        with _LOCK:
+            _CACHE[url] = (time.monotonic(), data)
     return data
 
 
@@ -69,13 +92,13 @@ def _keys(keyring_text):
 
 
 def _head_and_keys():
-    keyring = _get("/keyring").decode("utf-8")
+    keyring = _get("/keyring", cache=True).decode("utf-8")
     keys = _keys(keyring)
-    head = json.loads(_get("/head"))
+    head = json.loads(_get("/head", cache=True))
     return head["sth"], keys, keyring
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_NET)
 def get_checkpoint() -> dict:
     """Latest signed tree head of the LEGION MCP transparency log. The signature is checked against the keyring,
     anchored on the pinned root key fingerprint. Read-only. Returns tree_size, root_sha256, timestamp, signer and
@@ -93,8 +116,8 @@ def get_checkpoint() -> dict:
         return _err("INTERNAL", type(e).__name__)
 
 
-@mcp.tool()
-def get_server_changes(server_id: str, limit: int = 10) -> dict:
+@mcp.tool(annotations=READ_NET)
+def get_server_changes(server_id: StrictStr, limit: StrictInt = 10) -> dict:
     """Signed tool-list history of one MCP server as observed by LEGION (registry id, e.g. "xyz.signomy/civitae"),
     newest first, at most `limit` (1-50) changes, plus an evidence bundle for the latest record (record + RFC 9162
     inclusion proof + signed tree head + keyring) that `verify_evidence_bundle` checks offline.
@@ -126,8 +149,8 @@ def get_server_changes(server_id: str, limit: int = 10) -> dict:
         return _err("INTERNAL", type(e).__name__)
 
 
-@mcp.tool()
-def verify_evidence_bundle(bundle: dict, approved_tools_sha256: str = "") -> dict:
+@mcp.tool(annotations=READ_OFFLINE)
+def verify_evidence_bundle(bundle: dict, approved_tools_sha256: StrictStr = "") -> dict:
     """Verify an evidence bundle OFFLINE (no network call): keyring chain from the pinned root fingerprint, record
     signature and integrity, signed tree head, RFC 9162 inclusion proof. If `approved_tools_sha256` is given, also
     reports whether the signed tool list still matches the version you approved (UNAPPROVED_CHANGE if not).

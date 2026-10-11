@@ -1,57 +1,46 @@
-# Legion AI Intelligence — MCP Server
+# LEGION Verify — MCP server (3 read-only tools) · v1.1.0
 
-Connect AI agents to real-time AI ecosystem intelligence.
+Check what an MCP server exposed, and when, against LEGION's signed, append-only transparency log of MCP tool lists.
+Every answer is checked against a keyring anchored on a pinned root key fingerprint; evidence bundles can be re-checked
+offline.
 
-## Tools
+## Tools — all read-only (`readOnlyHint: true`, `destructiveHint: false`)
+| Tool | What it does | Network |
+|---|---|---|
+| `get_checkpoint` | Latest signed tree head; signature checked against the keyring | GET fixed routes of `https://tlog.legion-api.com/tlog/v0` |
+| `get_server_changes` | Signed tool-list history of one MCP server (registry id, `limit` 1–50), newest first, plus an evidence bundle for the latest record | GET fixed routes of `https://tlog.legion-api.com/tlog/v0` |
+| `verify_evidence_bundle` | Verifies a bundle OFFLINE: keyring chain from the pinned root, record signature, signed head, RFC 9162 inclusion proof; optional check against a tools hash you approved (`MATCHES_APPROVED` / `UNAPPROVED_CHANGE`) | none |
 
-| Tool | Description |
-|------|-------------|
-| get_ai_incidents | 1,178+ classified AI security incidents |
-| get_ai_model_pricing | 28 models, 7 providers |
-| get_gpu_pricing | GPU cloud pricing from 7 providers |
-| get_ai_route | Smart model routing (cost/speed/reliability) |
-| get_ai_status | Live provider availability |
-| get_company_intelligence | Cross-signal company analysis |
-| scan_n8n | n8n CVE-2026-21858 scanner |
+Nothing else: no write, no purchase, no scan, no caller-supplied URL, no private key, no API key needed.
 
-## Setup
+## Connect
+**Claude Code (remote)**
 
-Add to claude_desktop_config.json:
+    claude mcp add --transport http legion-verify https://mcp.legion-api.com/mcp
 
-    {
-      "mcpServers": {
-        "legion-ai": {
-          "command": "python3",
-          "args": ["path/to/server.py"]
-        }
-      }
-    }
+**Claude Desktop (local, stdio)** — `claude_desktop_config.json`:
 
-## Links
+    { "mcpServers": { "legion-verify": { "command": "python3", "args": ["/ABSOLUTE/PATH/server.py"] } } }
 
-- API: https://api.legion-api.com
-- RapidAPI: https://rapidapi.com/gemmozero/api/legion-ai-security-incidents
-- Datasets: https://huggingface.co/gemmozero
-- Site: https://legion-api.com
+(requires `pip install "mcp==2.1.1"`; `server.py` and `legion_tlog_verify.py` in the same folder)
 
-## Cursor / Claude Code / Windsurf
+**Any MCP client (remote)**: streamable HTTP at `https://mcp.legion-api.com/mcp`, no auth.
 
-```json
-{ "mcpServers": { "legion-ai": { "command": "uvx", "args": ["--from", "git+https://github.com/Legion33shadow/legion-mcp", "legion-mcp"] } } }
-```
+## Try it
+1. "Call get_checkpoint and give tree_size, root_sha256 and signature_valid."
+2. "With get_server_changes, show the signed history of xyz.signomy/civitae (limit 3)."
+3. "Pass the evidence_bundle you got to verify_evidence_bundle and tell me whether the proof is valid."
 
-No API key required. Free tier: 10 results per call. Full access: https://gemmo.gumroad.com/l/ngtmw
+## Verify the whole log yourself (no MCP, no pip)
+    PIN=a7c6a35b1c2c81d589a30c2ad628679bdea9da4139d49aa3c42cdde6e1c65036
+    curl -fsSLO https://legion33shadow.github.io/legion-tlog-mirror/legion_verify_mirror.py
+    python3 -I -S legion_verify_mirror.py "$PIN"
 
+Root key fingerprint — pin it out of band: `a7c6a35b1c2c81d589a30c2ad628679bdea9da4139d49aa3c42cdde6e1c65036`
 
-## GitHub Action — Legion Guard
+## Limits
+The log is the signed record of one observer (LEGION). Bitcoin anchors are `pending` (no `ots verify` on a full node yet).
+No independent witness has cosigned yet. Servers that require auth are not observed. Shared upstream rate limit: the
+public server makes 2 log requests per `get_server_changes` call.
 
-Fail a CI/deploy job if a provider you depend on had a critical incident or a substantive ToS change since the last run:
-
-```yaml
-- uses: Legion33shadow/legion-mcp/.github/actions/guard@main
-  with:
-    providers: openai,anthropic
-    fail_on: HOLD
-```
-
-No key required. Output `verdict`. Data: https://api.legion-api.com/guard
+License: MIT (see LICENSE).

@@ -1,11 +1,16 @@
 [project]
-name = "legion-mcp"
-version = "0.1.0"
-description = "MCP server: AI security incidents, model & GPU pricing, provider status"
+name = "legion-verify-mcp"
+version = "1.1.0"
+description = "MCP server: 3 read-only tools to check MCP tool-list history against LEGION's signed transparency log"
 requires-python = ">=3.10"
-dependencies = ["mcp==2.1.1", "requests>=2.31"]
+dependencies = ["mcp==2.1.1"]
+
 [project.scripts]
-legion-mcp = "server:main"
+legion-verify-mcp = "server:main"
+
+[tool.setuptools]
+py-modules = ["server", "legion_tlog_verify"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
