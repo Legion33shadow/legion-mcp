@@ -1,9 +1,15 @@
 [project]
 name = "legion-verify-mcp"
-version = "1.1.0"
-description = "MCP server: 3 read-only tools to check MCP tool-list history against LEGION's signed transparency log"
+version = "1.2.0"
+description = "MCP server: 3 read-only tools to detect MCP tool drift against LEGION's signed transparency log"
+readme = "README.md"
+license = {text = "MIT"}
+keywords = ["mcp", "model-context-protocol", "mcp-server", "transparency-log", "tool-pinning", "tool-drift", "supply-chain", "ed25519", "rfc9162"]
 requires-python = ">=3.10"
 dependencies = ["mcp==2.1.1"]
+
+[project.urls]
+Source = "https://github.com/Legion33shadow/legion-mcp"
 
 [project.scripts]
 legion-verify-mcp = "server:main"

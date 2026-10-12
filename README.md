@@ -1,8 +1,12 @@
-# LEGION Verify — MCP server (3 read-only tools) · v1.1.0
+# LEGION Verify — MCP server to detect MCP tool drift (3 read-only tools) · v1.2.0
 
-Check what an MCP server exposed, and when, against LEGION's signed, append-only transparency log of MCP tool lists.
-Every answer is checked against a keyring anchored on a pinned root key fingerprint; evidence bundles can be re-checked
-offline.
+Did an MCP server change its tools after you approved them? A model reads tool descriptions as instructions, so a
+silent change to a description or an `inputSchema` (tool drift, "rug pull") matters. LEGION Verify answers from
+LEGION's signed, append-only transparency log of MCP tool lists: what a server exposed, and when it changed.
+Every answer is checked against a keyring anchored on a pinned root key fingerprint (Ed25519, RFC 9162 Merkle proofs);
+evidence bundles can be re-checked offline.
+
+To pin tool lists in a lockfile and fail CI on drift, see [legion-lock](https://github.com/Legion33shadow/legion-lock).
 
 ## Tools — all read-only (`readOnlyHint: true`, `destructiveHint: false`)
 | Tool | What it does | Network |
@@ -39,8 +43,12 @@ Nothing else: no write, no purchase, no scan, no caller-supplied URL, no private
 Root key fingerprint — pin it out of band: `a7c6a35b1c2c81d589a30c2ad628679bdea9da4139d49aa3c42cdde6e1c65036`
 
 ## Limits
-The log is the signed record of one observer (LEGION). Bitcoin anchors are `pending` (no `ots verify` on a full node yet).
-No independent witness has cosigned yet. Servers that require auth are not observed. Shared upstream rate limit: the
-public server makes 2 log requests per `get_server_changes` call.
+The log is the signed record of one observer (LEGION); it does not show what a server serves to other clients.
+Only `name`, `description` and `inputSchema` are fingerprinted. A change appears only after the next LEGION
+observation and the next signed head. Bitcoin anchors are `pending` (no `ots verify` on a full node yet).
+No independent witness has cosigned yet. Servers that require auth are not observed.
+
+Public server (v1.2.0): immutable proofs and per-head history are cached; each client (IP seen by Cloudflare) may
+trigger at most 20 uncached log requests per minute (`CLIENT_RATE_LIMITED` otherwise; cached answers still served).
 
 License: MIT (see LICENSE).

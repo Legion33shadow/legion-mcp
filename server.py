@@ -8,6 +8,7 @@ Aucune clé privée, aucun shell, aucun achat, aucune écriture, aucune URL four
 du journal public sont lues (LEGION_TLOG_BASE). Transport : stdio par défaut ; streamable-http si MCP_TRANSPORT=http
 (mêmes réglages que la prod : 127.0.0.1, MCP_PORT, défaut 8802, protection DNS-rebinding).
 """
+import collections
 import json
 import os
 import re
@@ -17,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import StrictInt, StrictStr
 
@@ -33,8 +34,15 @@ MAX_FETCH_BYTES = 2 * 1024 * 1024
 UA = "legion-verify-mcp/0.1"
 CACHE_TTL = 30            # s : trousseau + tête signée partagés entre appels (évite les 429 du limiteur du journal)
 _CACHE, _LOCK = {}, threading.Lock()
+# Cache des réponses IMMUABLES ou liées à une tête signée (version 1.2.0) :
+#  - /proof/inclusion?leaf_index=I&tree_size=N avec N = taille d'une tête signée : ne change jamais ;
+#  - /servers/{id} : mémorisé pour la tête signée courante, vidé dès que la tête change.
+# Quota par client (IP vue par Cloudflare, en-tête CF-Connecting-IP) sur les seuls appels qui partent vers le journal :
+# un gros utilisateur ne peut pas consommer plus de CLIENT_MISS_PER_MIN des ~60 requêtes/min allouées à notre IP.
+PROOF_CACHE_MAX, SERVERS_CACHE_MAX, CLIENT_MISS_PER_MIN = 20000, 5000, 20
+_PROOFS, _SERVERS, _SERVERS_HEAD, _MISSES = collections.OrderedDict(), collections.OrderedDict(), [None], {}
 
-mcp = MCPServer("LEGION Verify", version="1.1.0")
+mcp = MCPServer("LEGION Verify", version="1.2.0")
 # Les 3 outils sont en LECTURE SEULE : aucun n'écrit, n'achète, ne scanne ni ne récupère une URL fournie par l'appelant.
 READ_NET = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True)
 READ_OFFLINE = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
@@ -79,6 +87,50 @@ def _get(path, params=None, cache=False):
     return data
 
 
+def _lru_get(d, k):
+    with _LOCK:
+        if k in d:
+            d.move_to_end(k)
+            return d[k]
+    return None
+
+
+def _lru_put(d, k, v, cap):
+    with _LOCK:
+        d[k] = v
+        d.move_to_end(k)
+        while len(d) > cap:
+            d.popitem(last=False)
+
+
+def _client(ctx):
+    """Identité du client pour le quota : IP posée par Cloudflare ; None en stdio (un seul utilisateur local)."""
+    try:
+        h = ctx.headers if ctx is not None else None
+    except Exception:
+        h = None
+    if h is None:
+        return None
+    return (h.get("cf-connecting-ip") or "local").strip()[:64]
+
+
+def _take_miss(client):
+    """Réserve un appel vers le journal pour ce client ; False si son quota de la minute est atteint."""
+    if client is None:
+        return True
+    now = time.monotonic()
+    with _LOCK:
+        q = [t for t in _MISSES.get(client, []) if now - t < 60]
+        if len(q) >= CLIENT_MISS_PER_MIN:
+            _MISSES[client] = q
+            return False
+        q.append(now)
+        _MISSES[client] = q
+        if len(_MISSES) > 50000:
+            _MISSES.clear()
+        return True
+
+
 def _keys(keyring_text):
     """Trousseau -> clés valides, ancré sur l'empreinte racine ÉPINGLÉE (jamais sur ce que dit le serveur)."""
     first = json.loads(next(l for l in keyring_text.splitlines() if l.strip()))
@@ -117,7 +169,7 @@ def get_checkpoint() -> dict:
 
 
 @mcp.tool(annotations=READ_NET)
-def get_server_changes(server_id: StrictStr, limit: StrictInt = 10) -> dict:
+def get_server_changes(server_id: StrictStr, limit: StrictInt = 10, ctx: Context = None) -> dict:
     """Signed tool-list history of one MCP server as observed by LEGION (registry id, e.g. "xyz.signomy/civitae"),
     newest first, at most `limit` (1-50) changes, plus an evidence bundle for the latest record (record + RFC 9162
     inclusion proof + signed tree head + keyring) that `verify_evidence_bundle` checks offline.
@@ -130,13 +182,33 @@ def get_server_changes(server_id: StrictStr, limit: StrictInt = 10) -> dict:
     try:
         sth, keys, keyring = _head_and_keys()
         size = sth["tree_head"]["tree_size"]
-        srv = json.loads(_get("/servers/" + urllib.parse.quote(server_id, safe="/@:")))
+        client = _client(ctx)
+        with _LOCK:
+            if _SERVERS_HEAD[0] != size:                 # nouvelle tête signée : les historiques mémorisés sont périmés
+                _SERVERS.clear()
+                _SERVERS_HEAD[0] = size
+        raw = _lru_get(_SERVERS, (server_id, size))
+        if raw is None:
+            if not _take_miss(client):
+                return _err("CLIENT_RATE_LIMITED", "quota de %d requêtes/min vers le journal atteint pour ce client ; "
+                            "réessayez dans une minute (les réponses déjà en cache restent servies)" % CLIENT_MISS_PER_MIN)
+            raw = _get("/servers/" + urllib.parse.quote(server_id, safe="/@:"))
+            _lru_put(_SERVERS, (server_id, size), raw, SERVERS_CACHE_MAX)
+        srv = json.loads(raw)
         latest = srv.get("latest_record")
         if not isinstance(latest, dict):
             return _err("NOT_FOUND", "aucun enregistrement signé pour ce serveur")
         if latest["leaf_index"] >= size:
             return _err("NOT_YET_COVERED", "le dernier enregistrement n'est pas encore couvert par une tête signée")
-        proof = json.loads(_get("/proof/inclusion", {"leaf_index": latest["leaf_index"], "tree_size": size}))
+        pk = (latest["leaf_index"], size)
+        praw = _lru_get(_PROOFS, pk)
+        if praw is None:
+            if not _take_miss(client):
+                return _err("CLIENT_RATE_LIMITED", "quota de %d requêtes/min vers le journal atteint pour ce client ; "
+                            "réessayez dans une minute (les réponses déjà en cache restent servies)" % CLIENT_MISS_PER_MIN)
+            praw = _get("/proof/inclusion", {"leaf_index": latest["leaf_index"], "tree_size": size})
+            _lru_put(_PROOFS, pk, praw, PROOF_CACHE_MAX)
+        proof = json.loads(praw)
         changes = sorted(srv.get("records", []), key=lambda r: r.get("leaf_index", -1), reverse=True)
         return {"ok": True, "server_id": server_id, "changes_total": len(changes),
                 "changes": [{k: c.get(k) for k in ("leaf_index", "observed_at", "change", "tools_sha256")} for c in changes[:limit]],
