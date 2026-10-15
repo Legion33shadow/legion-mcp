@@ -90,15 +90,23 @@ def bundle():
 
 
 class T1_Protocol(unittest.TestCase):
-    def test_tools_list_exactly_three(self):
+    def test_tools_list_exactly_four(self):
         names = sorted(t["name"] for t in C.rpc("tools/list")["result"]["tools"])
-        self.assertEqual(names, ["get_checkpoint", "get_server_changes", "verify_evidence_bundle"])
+        self.assertEqual(names, ["get_checkpoint", "get_server_changes", "verify_evidence_bundle", "verify_mcp_server"])
 
     def test_removed_tools_are_unreachable(self):
         for name, args in [("notarize", {"sha256": "0" * 64}), ("scan_n8n", {"target": "http://example.com"}),
-                           ("get_gpu_decision", {}), ("verify_mcp_server", {"url": "http://169.254.169.254/"})]:
+                           ("get_gpu_decision", {})]:
             r = C.call(name, args)
             self.assertTrue("_jsonrpc_error" in r or "_isError" in r, (name, r))
+
+    def test_verify_mcp_server_never_probes_unlisted_url(self):
+        # v1.3.0 : l'URL est seulement cherchée dans le registre ; une adresse hors registre (métadonnées cloud) n'est jamais sondée
+        r = C.call("verify_mcp_server", {"url": "http://169.254.169.254/", "live": True})
+        if "_jsonrpc_error" in r or "_isError" in r:
+            return          # refus en amont : acceptable
+        self.assertFalse(r.get("known_in_registry"), r)
+        self.assertEqual(r.get("servers"), [], r)
 
 
 @unittest.skipIf(OFFLINE, "réseau requis")

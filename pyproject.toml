@@ -1,6 +1,6 @@
 [project]
 name = "legion-verify-mcp"
-version = "1.2.0"
+version = "1.3.0"
 description = "MCP server: 3 read-only tools to detect MCP tool drift against LEGION's signed transparency log"
 readme = "README.md"
 license = {text = "MIT"}

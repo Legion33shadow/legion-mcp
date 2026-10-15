@@ -1,4 +1,4 @@
-# LEGION Verify — MCP server to detect MCP tool drift (3 read-only tools) · v1.2.0
+# LEGION Verify — MCP server to detect MCP tool drift (4 read-only tools) · v1.3.0
 
 Did an MCP server change its tools after you approved them? A model reads tool descriptions as instructions, so a
 silent change to a description or an `inputSchema` (tool drift, "rug pull") matters. LEGION Verify answers from
@@ -14,8 +14,9 @@ To pin tool lists in a lockfile and fail CI on drift, see [legion-lock](https://
 | `get_checkpoint` | Latest signed tree head; signature checked against the keyring | GET fixed routes of `https://tlog.legion-api.com/tlog/v0` |
 | `get_server_changes` | Signed tool-list history of one MCP server (registry id, `limit` 1–50), newest first, plus an evidence bundle for the latest record | GET fixed routes of `https://tlog.legion-api.com/tlog/v0` |
 | `verify_evidence_bundle` | Verifies a bundle OFFLINE: keyring chain from the pinned root, record signature, signed head, RFC 9162 inclusion proof; optional check against a tools hash you approved (`MATCHES_APPROVED` / `UNAPPROVED_CHANGE`) | none |
+| `verify_mcp_server` | Paste an MCP server URL: matched against the official MCP registry, then the latest signed tool-list record, change count (total / 30 days), RFC 9162 inclusion proof re-checked from the pinned root, and an evidence bundle. `live=true` adds the tool list served now, compared with the signed one (not signed) | GET `https://legion-api.com/drift/verify` (default; `LEGION_DRIFT_BASE`). The live comparison runs only on the hosted endpoint, and only for servers listed in the registry |
 
-Nothing else: no write, no purchase, no scan, no caller-supplied URL, no private key, no API key needed.
+Nothing else: no write, no purchase, no private key, no API key needed. The only caller-supplied URL is the one given to `verify_mcp_server`: it is looked up in the registry; this server never connects to it. On the hosted endpoint, `live=true` lets LEGION's drift service send `initialize` + `tools/list` to that server, and only if it is a registry entry with a public address.
 
 ## Connect
 **Claude Code (remote)**
@@ -34,6 +35,9 @@ Nothing else: no write, no purchase, no scan, no caller-supplied URL, no private
 1. "Call get_checkpoint and give tree_size, root_sha256 and signature_valid."
 2. "With get_server_changes, show the signed history of xyz.signomy/civitae (limit 3)."
 3. "Pass the evidence_bundle you got to verify_evidence_bundle and tell me whether the proof is valid."
+4. "Use verify_mcp_server on https://tandem.ac/mcp with live=true: did its tools change since the signed record?"
+
+Same check in a browser, with an embeddable badge: https://legion-api.com/drift/check/
 
 ## Verify the whole log yourself (no MCP, no pip)
     PIN=a7c6a35b1c2c81d589a30c2ad628679bdea9da4139d49aa3c42cdde6e1c65036
@@ -48,7 +52,7 @@ Only `name`, `description` and `inputSchema` are fingerprinted. A change appears
 observation and the next signed head. Bitcoin anchors are `pending` (no `ots verify` on a full node yet).
 No independent witness has cosigned yet. Servers that require auth are not observed.
 
-Public server (v1.2.0): immutable proofs and per-head history are cached; each client (IP seen by Cloudflare) may
+Public server (v1.3.0): immutable proofs and per-head history are cached; each client (IP seen by Cloudflare) may
 trigger at most 20 uncached log requests per minute (`CLIENT_RATE_LIMITED` otherwise; cached answers still served).
 
 License: MIT (see LICENSE).

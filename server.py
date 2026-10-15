@@ -1,11 +1,14 @@
-"""LEGION Verify — serveur MCP à 3 outils, lecture seule.
+"""LEGION Verify — serveur MCP à 4 outils, lecture seule.
 
   get_checkpoint          dernière tête signée du journal MCP LEGION, signature vérifiée depuis l'empreinte racine épinglée
   get_server_changes      historique signé d'un serveur MCP + paquet de preuve (record, preuve d'inclusion, tête, trousseau)
   verify_evidence_bundle  vérifie un paquet de preuve HORS LIGNE (aucun appel réseau) ; option : empreinte d'outils approuvée
+  verify_mcp_server       URL d'un serveur MCP -> dernière définition signée, changements, preuve d'inclusion + tête signée
+                          (revérifiées ici), et si la définition servie maintenant diffère (sonde du service drift, non signée)
 
-Aucune clé privée, aucun shell, aucun achat, aucune écriture, aucune URL fournie par l'appelant : seules des routes fixes
-du journal public sont lues (LEGION_TLOG_BASE). Transport : stdio par défaut ; streamable-http si MCP_TRANSPORT=http
+Aucune clé privée, aucun shell, aucun achat, aucune écriture. Seules des routes fixes sont lues : journal public
+(LEGION_TLOG_BASE) et /verify du service drift (LEGION_DRIFT_BASE) ; l'URL passée à verify_mcp_server n'est jamais
+récupérée par ce serveur, le service drift ne sonde que des adresses publiques. Transport : stdio par défaut ; streamable-http si MCP_TRANSPORT=http
 (mêmes réglages que la prod : 127.0.0.1, MCP_PORT, défaut 8802, protection DNS-rebinding).
 """
 import collections
@@ -42,8 +45,8 @@ _CACHE, _LOCK = {}, threading.Lock()
 PROOF_CACHE_MAX, SERVERS_CACHE_MAX, CLIENT_MISS_PER_MIN = 20000, 5000, 20
 _PROOFS, _SERVERS, _SERVERS_HEAD, _MISSES = collections.OrderedDict(), collections.OrderedDict(), [None], {}
 
-mcp = MCPServer("LEGION Verify", version="1.2.0")
-# Les 3 outils sont en LECTURE SEULE : aucun n'écrit, n'achète, ne scanne ni ne récupère une URL fournie par l'appelant.
+mcp = MCPServer("LEGION Verify", version="1.3.0")
+# Les 4 outils sont en LECTURE SEULE : aucun n'écrit ni n'achète ; verify_mcp_server délègue la sonde tools/list au service drift.
 READ_NET = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True)
 READ_OFFLINE = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
 
@@ -259,6 +262,108 @@ def verify_evidence_bundle(bundle: dict, approved_tools_sha256: StrictStr = "") 
     else:
         out["error"] = {"code": "EVIDENCE_REJECTED", "message": "échec : " + ", ".join(k for k, v in checks.items() if not v)}
     return out
+
+
+DRIFT_BASE = os.environ.get("LEGION_DRIFT_BASE", "https://legion-api.com/drift").rstrip("/")   # la prod fixe http://127.0.0.1:8898 (drop-in systemd)
+MAX_URL = 500
+_SELF = {"ip": None, "checked": 0.0}
+
+
+def _self_ip():
+    """IP sortante de LEGION (cdn-cgi/trace, 30 min) : un appel venant de LEGION via le tunnel n'est pas un tiers."""
+    if time.monotonic() - _SELF["checked"] > 1800 or not _SELF["checked"]:
+        _SELF["checked"] = time.monotonic()
+        try:
+            txt = urllib.request.urlopen(urllib.request.Request("https://legion-api.com/cdn-cgi/trace", headers={"User-Agent": UA}),
+                                         timeout=5).read().decode()
+            _SELF["ip"] = next(l.split("=", 1)[1] for l in txt.splitlines() if l.startswith("ip="))
+        except Exception:
+            pass
+    return _SELF["ip"]
+
+
+def _third_party(client):
+    """Tiers = client vu par Cloudflare (CF-Connecting-IP) différent de l'IP sortante de LEGION. stdio / local : jamais tiers."""
+    return client not in (None, "local") and client != _self_ip()
+
+
+def _valid_url(url):
+    if not isinstance(url, str) or not 0 < len(url) <= MAX_URL or any(ord(c) < 33 or ord(c) == 127 for c in url):
+        return False
+    p = urllib.parse.urlsplit(url)
+    return p.scheme in ("https", "http") and bool(p.hostname) and p.username is None and p.password is None
+
+
+def _drift_verify(url, live, third_party):
+    """GET sur la route FIXE /verify du service drift LEGION (loopback). L'URL n'est jamais récupérée par ce serveur :
+    le service drift la résout dans le registre et ne sonde (initialize + tools/list) que des adresses publiques."""
+    q = DRIFT_BASE + "/verify?" + urllib.parse.urlencode({"url": url, "live": 1 if live else 0})
+    h = {"User-Agent": UA, "X-Legion-Via": "mcp"}
+    if not third_party:
+        h["X-Legion-Test"] = "1"          # le service drift ne compte alors pas l'appel comme tiers
+    try:
+        with urllib.request.urlopen(urllib.request.Request(q, headers=h), timeout=40) as r:
+            data = r.read(MAX_FETCH_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        raise ToolFail({400: "INVALID_URL", 429: "RATE_LIMITED"}.get(e.code, "UPSTREAM_HTTP_%d" % e.code),
+                       "service drift : HTTP %d" % e.code)
+    except Exception as e:
+        raise ToolFail("UPSTREAM_UNREACHABLE", "service drift injoignable (%s)" % type(e).__name__)
+    if len(data) > MAX_FETCH_BYTES:
+        raise ToolFail("UPSTREAM_TOO_LARGE", "réponse du service drift trop grande")
+    return json.loads(data)
+
+
+@mcp.tool(annotations=READ_NET)
+def verify_mcp_server(url: StrictStr, live: bool = True, ctx: Context = None) -> dict:
+    """Check an MCP server URL against LEGION's signed transparency log. Read-only. For each registry server at this
+    URL: latest signed tool definition (leaf index, date, tools_sha256), number of tool changes (total and 30 days),
+    date of the last change, RFC 9162 inclusion proof + signed tree head (re-verified here from the pinned root key),
+    an evidence bundle for `verify_evidence_bundle`, and — if live=true — whether the tool list served NOW differs from
+    the signed one (live check by LEGION: initialize + tools/list only, public addresses only, NOT signed).
+    A change is not a fault; history = what LEGION observed, not what other clients see."""
+    if not _valid_url(url):
+        return _err("INVALID_URL", "url : http(s)://hôte[/chemin], 1-%d caractères imprimables, sans identifiants" % MAX_URL)
+    if not isinstance(live, bool):
+        return _err("INVALID_LIVE", "live : booléen")
+    try:
+        client = _client(ctx)
+        if not _take_miss(client):
+            return _err("CLIENT_RATE_LIMITED", "quota de %d requêtes/min atteint pour ce client ; réessayez dans une minute"
+                        % CLIENT_MISS_PER_MIN)
+        v = _drift_verify(url, live, _third_party(client))
+        _, keys, keyring = _head_and_keys()
+        servers = []
+        for s in v.get("servers", []):
+            if not s.get("observed"):
+                servers.append({"server_id": s.get("server_id"), "observed": False, "claim_state": "not_observed"})
+                continue
+            rec, proof, sth = s["record"], s["proof"], s["sth"]
+            integ, sig, _ = T.check_record(rec, keys)
+            checks = {"record_integrity": bool(integ), "record_signature": bool(sig), "head_signature": bool(T.check_sth(sth, keys)),
+                      "inclusion": bool(T.check_inclusion(rec, proof, sth))}
+            out = {"server_id": s["server_id"], "observed": True,
+                   "latest_signed_definition": {k: s["latest_signed"].get(k) for k in ("leaf_index", "observed_at", "tools_sha256", "tool_count")},
+                   "changes_total": s["changes_total"], "changes_30d": s["changes_30d"], "last_change_at": s["last_change_at"],
+                   "first_observed_at": s["first_observed_at"],
+                   "inclusion_proof": {"leaf_index": proof["leaf_index"], "tree_size": proof["tree_size"], "audit_path": proof["audit_path"]},
+                   "signed_tree_head": sth, "evidence_checks": checks, "evidence_verified": all(checks.values()),
+                   "evidence_bundle": {"record": rec, "proof": proof, "sth": sth, "keyring": keyring},
+                   "claim_state": "verified_signed_observation" if all(checks.values()) else "evidence_rejected"}
+            lv = s.get("live")
+            if lv is not None:
+                out["current_definition"] = {"status": lv.get("status"), "checked_at": lv.get("checked_at"),
+                                             "tools_sha256": lv.get("tools_sha256"), "differs_from_signed": lv.get("differs_from_signed"),
+                                             "diff": lv.get("diff"), "signed": False,
+                                             "note": "checked now by LEGION, not signed; a difference is not a fault"}
+            servers.append(out)
+        return {"ok": True, "url": v.get("url"), "known_in_registry": v.get("known_in_registry"), "servers": servers,
+                "root_pin_sha256": ROOT_PIN, "claim_state": "observed_by_legion",
+                "note": "signed history = LEGION observations; current_definition is a live, unsigned check. A change is not a fault."}
+    except ToolFail as e:
+        return _err(e.code, e.message)
+    except Exception as e:
+        return _err("INTERNAL", type(e).__name__)
 
 
 def main():
