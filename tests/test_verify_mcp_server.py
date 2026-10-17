@@ -128,7 +128,7 @@ def main():
         # ---- bout en bout sur stdio
         C = Stdio(env)
         tools = {t["name"]: t for t in C.rpc("tools/list", {})["result"]["tools"]}
-        check("tools/list : 4 outils dont verify_mcp_server", len(tools) == 4 and "verify_mcp_server" in tools, list(tools))
+        check("tools/list : 5 outils dont verify_mcp_server et check_mcp_server", len(tools) == 5 and "verify_mcp_server" in tools and "check_mcp_server" in tools, list(tools))
         ann = (tools.get("verify_mcp_server") or {}).get("annotations") or {}
         check("verify_mcp_server annoncé en lecture seule, non destructif", ann.get("readOnlyHint") is True and ann.get("destructiveHint") is False, ann)
 

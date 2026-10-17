@@ -90,9 +90,9 @@ def bundle():
 
 
 class T1_Protocol(unittest.TestCase):
-    def test_tools_list_exactly_four(self):
+    def test_tools_list_exactly_five(self):
         names = sorted(t["name"] for t in C.rpc("tools/list")["result"]["tools"])
-        self.assertEqual(names, ["get_checkpoint", "get_server_changes", "verify_evidence_bundle", "verify_mcp_server"])
+        self.assertEqual(names, ["check_mcp_server", "get_checkpoint", "get_server_changes", "verify_evidence_bundle", "verify_mcp_server"])
 
     def test_removed_tools_are_unreachable(self):
         for name, args in [("notarize", {"sha256": "0" * 64}), ("scan_n8n", {"target": "http://example.com"}),

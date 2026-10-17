@@ -1,4 +1,4 @@
-# LEGION Verify — MCP server to detect MCP tool drift (4 read-only tools) · v1.3.0
+# LEGION Verify — MCP server to detect MCP tool drift (5 read-only tools) · v1.3.0
 
 Did an MCP server change its tools after you approved them? A model reads tool descriptions as instructions, so a
 silent change to a description or an `inputSchema` (tool drift, "rug pull") matters. LEGION Verify answers from
@@ -14,7 +14,8 @@ To pin tool lists in a lockfile and fail CI on drift, see [legion-lock](https://
 | `get_checkpoint` | Latest signed tree head; signature checked against the keyring | GET fixed routes of `https://tlog.legion-api.com/tlog/v0` |
 | `get_server_changes` | Signed tool-list history of one MCP server (registry id, `limit` 1–50), newest first, plus an evidence bundle for the latest record | GET fixed routes of `https://tlog.legion-api.com/tlog/v0` |
 | `verify_evidence_bundle` | Verifies a bundle OFFLINE: keyring chain from the pinned root, record signature, signed head, RFC 9162 inclusion proof; optional check against a tools hash you approved (`MATCHES_APPROVED` / `UNAPPROVED_CHANGE`) | none |
-| `verify_mcp_server` | Paste an MCP server URL: matched against the official MCP registry, then the latest signed tool-list record, change count (total / 30 days), RFC 9162 inclusion proof re-checked from the pinned root, and an evidence bundle. `live=true` adds the tool list served now, compared with the signed one (not signed) | GET `https://legion-api.com/drift/verify` (default; `LEGION_DRIFT_BASE`). The live comparison runs only on the hosted endpoint, and only for servers listed in the registry |
+| `verify_mcp_server` | Paste an MCP server URL: matched against the public MCP registry, then the latest signed tool-list record, change count (total / 30 days), RFC 9162 inclusion proof re-checked from the pinned root, and an evidence bundle. `live=true` adds the tool list served now, compared with the signed one (not signed) | GET `https://legion-api.com/drift/verify` (default; `LEGION_DRIFT_BASE`). The live comparison runs only on the hosted endpoint, and only for servers listed in the registry |
+| `check_mcp_server` | One call for a registry id: signed tool-list fingerprint history, last change with fingerprints before/after and diff link, per-server coverage from the signed COVERAGE_V1 register (`full_register` is `COMPLETE` only if observed in every cycle, `UNKNOWN` if partial), proof URLs, and one command that re-checks everything offline (`legion_check` kit). Unknown id → `UNKNOWN` (absence from the log is not a verdict) | GET fixed routes of `https://tlog.legion-api.com/tlog/v0` and `https://legion-api.com/tlog/v0/coverage` |
 
 Nothing else: no write, no purchase, no private key, no API key needed. The only caller-supplied URL is the one given to `verify_mcp_server`: it is looked up in the registry; this server never connects to it. On the hosted endpoint, `live=true` lets LEGION's drift service send `initialize` + `tools/list` to that server, and only if it is a registry entry with a public address.
 

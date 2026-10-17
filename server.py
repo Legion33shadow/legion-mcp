@@ -46,7 +46,7 @@ PROOF_CACHE_MAX, SERVERS_CACHE_MAX, CLIENT_MISS_PER_MIN = 20000, 5000, 20
 _PROOFS, _SERVERS, _SERVERS_HEAD, _MISSES = collections.OrderedDict(), collections.OrderedDict(), [None], {}
 
 mcp = MCPServer("LEGION Verify", version="1.3.0")
-# Les 4 outils sont en LECTURE SEULE : aucun n'écrit ni n'achète ; verify_mcp_server délègue la sonde tools/list au service drift.
+# Les 5 outils sont en LECTURE SEULE : aucun n'écrit ni n'achète ; verify_mcp_server délègue la sonde tools/list au service drift.
 READ_NET = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True)
 READ_OFFLINE = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
 
@@ -177,7 +177,7 @@ def get_server_changes(server_id: StrictStr, limit: StrictInt = 10, ctx: Context
     newest first, at most `limit` (1-50) changes, plus an evidence bundle for the latest record (record + RFC 9162
     inclusion proof + signed tree head + keyring) that `verify_evidence_bundle` checks offline.
     A change is not a fault; history = what LEGION observed, not what other clients see."""
-    if not isinstance(server_id, str) or not server_id or len(server_id) > MAX_SERVER_ID or not SERVER_ID_RE.match(server_id) \
+    if not isinstance(server_id, str) or not server_id or len(server_id) > MAX_SERVER_ID or not SERVER_ID_RE.fullmatch(server_id) \
             or ".." in server_id:
         return _err("INVALID_SERVER_ID", "server_id : 1-%d caractères [A-Za-z0-9._@:-] et au plus 4 '/'" % MAX_SERVER_ID)
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_LIMIT:
@@ -360,6 +360,124 @@ def verify_mcp_server(url: StrictStr, live: bool = True, ctx: Context = None) ->
         return {"ok": True, "url": v.get("url"), "known_in_registry": v.get("known_in_registry"), "servers": servers,
                 "root_pin_sha256": ROOT_PIN, "claim_state": "observed_by_legion",
                 "note": "signed history = LEGION observations; current_definition is a live, unsigned check. A change is not a fault."}
+    except ToolFail as e:
+        return _err(e.code, e.message)
+    except Exception as e:
+        return _err("INTERNAL", type(e).__name__)
+
+
+COVERAGE_BASE = os.environ.get("LEGION_COVERAGE_BASE", "https://legion-api.com/tlog/v0/coverage").rstrip("/")
+CLAIM_BOUNDARY_CHECK = {
+    "fr": "LEGION n'observe qu'une partie des serveurs ; absence du journal n'est pas un verdict ; couverture affichée par "
+          "serveur, UNKNOWN si partielle. Un changement n'est pas une attaque. Ce journal ne certifie pas qu'un serveur est sûr.",
+    "en": "LEGION observes only part of the servers; absence from the log is not a verdict; coverage is shown per server, "
+          "UNKNOWN if partial. A change is not an attack. This log does not certify that a server is secure.",
+    "scope": "what LEGION saw with initialize + tools/list from its own probes; nothing between two observations, nothing about "
+             "what other clients saw or about the code behind the tools."}
+REFERENCES = [
+    {"name": "OWASP MCP Top 10", "url": "https://owasp.org/www-project-mcp-top-10/"},
+    {"name": "C2SP tlog-checkpoint", "url": "https://c2sp.org/tlog-checkpoint"},
+    {"name": "C2SP tlog-cosignature", "url": "https://c2sp.org/tlog-cosignature"},
+    {"name": "C2SP signed-note", "url": "https://c2sp.org/signed-note"}]
+REFERENCES_NOTE = "cited as references only: no partnership, no endorsement, no conformity claim"
+KIT_BASE = os.environ.get("LEGION_KIT_BASE", "https://legion-api.com/tlog/check").rstrip("/")
+KIT = ("curl -sA mcp-tlog-verifier/1.0 -O " + KIT_BASE + "/legion_check_kit-20261017.tar.gz && tar xzf legion_check_kit-20261017.tar.gz && "
+       "python3 legion_check/fetch.py %s proof.json && python3 legion_check/verify_offline.py proof.json")
+
+
+def _coverage(server_id):
+    """Couverture par serveur, registre COVERAGE_V1 (route fixe). COMPLETE seulement si le serveur a été observé, avec la
+    même empreinte, à chaque cycle du registre ; sinon UNKNOWN (partielle) avec les nombres mesurés."""
+    import hashlib
+    url = "%s/server/%s.json" % (COVERAGE_BASE, hashlib.sha256(server_id.encode("utf-8")).hexdigest())
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=10) as r:
+            doc = json.loads(r.read(64 * 1024))
+        v, n = doc.get("verdict") or {}, doc.get("tree_size")
+        streak = v.get("cycles") if v.get("state") == "UNCHANGED_SINCE" else 0
+        complete = isinstance(n, int) and n > 0 and streak == n and v.get("before") == "log_start"
+        out = {"state": v.get("state") or "UNKNOWN", "since": v.get("since"), "fingerprint": v.get("fp"),
+               "consecutive_cycles": streak, "before_streak": v.get("before"), "register_cycles": n,
+               "full_register": "COMPLETE" if complete else "UNKNOWN",
+               "source": url, "signature_check": "not done by this tool; done offline by verify_offline.py (see verify_offline)"}
+        if v.get("state") == "UNCHANGED_SINCE":
+            out["meaning"] = ("observed by LEGION with the same tool-list fingerprint in each of the last %s consecutive cycles since %s; "
+                              "nothing is said between cycles or before %s" % (streak, v.get("since"), v.get("since")))
+        else:
+            out["reason"] = v.get("reason") or "not observed in the last cycle"
+        if not complete:
+            out["full_register_reason"] = ("partial: not observed with one fingerprint in every one of the %s register cycles%s"
+                                           % (n, " (before the streak: %s)" % v.get("before") if v.get("before") else ""))
+        return out
+    except Exception:
+        return {"state": "UNKNOWN", "reason": "the COVERAGE_V1 register has no readable file for this server"}
+
+
+@mcp.tool(annotations=READ_NET)
+def check_mcp_server(server_id: StrictStr, ctx: Context = None) -> dict:
+    """One-call summary for an MCP server registry id (e.g. "ai.alphaquantlabs/propertycheck"): tool-list fingerprint
+    history observed by LEGION, last change, per-server coverage from the signed COVERAGE_V1 register (COMPLETE only if
+    observed in every register cycle, UNKNOWN if partial), proof references and a command that verifies everything offline.
+    Read-only. Unknown id -> state UNKNOWN (absence from the log is not a verdict). A change is not an attack; this log
+    does not certify that a server is secure."""
+    try:   # instance hébergée seulement : compteur local optionnel (absent du dépôt, inactif sans LEGION_USAGE_DB)
+        import legion_usage
+        legion_usage.record("check_mcp_server", ctx.headers if ctx is not None else None)
+    except Exception:
+        pass
+    if not isinstance(server_id, str) or not server_id or len(server_id) > MAX_SERVER_ID or not SERVER_ID_RE.fullmatch(server_id) \
+            or ".." in server_id:
+        return _err("INVALID_SERVER_ID", "server_id : 1-%d caractères [A-Za-z0-9._@:-] et au plus 4 '/'" % MAX_SERVER_ID)
+    try:
+        sth, keys, _ = _head_and_keys()
+        size = sth["tree_head"]["tree_size"]
+        if not T.check_sth(sth, keys):
+            return _err("HEAD_SIGNATURE_INVALID", "la tête signée du journal ne vérifie pas")
+        client = _client(ctx)
+        with _LOCK:
+            if _SERVERS_HEAD[0] != size:
+                _SERVERS.clear()
+                _SERVERS_HEAD[0] = size
+        raw = _lru_get(_SERVERS, (server_id, size))
+        if raw is None:
+            if not _take_miss(client):
+                return _err("CLIENT_RATE_LIMITED", "quota de %d requêtes/min vers le journal atteint pour ce client ; "
+                            "réessayez dans une minute" % CLIENT_MISS_PER_MIN)
+            try:
+                raw = _get("/servers/" + urllib.parse.quote(server_id, safe="/@:"))
+            except ToolFail as e:
+                if e.code == "NOT_FOUND":
+                    return {"ok": True, "server_id": server_id, "state": "UNKNOWN", "reason": "no signed record for this id in the log; absence from the log is not a verdict",
+                            "log_tree_size": size, "claim_boundary": CLAIM_BOUNDARY_CHECK}
+                raise
+            _lru_put(_SERVERS, (server_id, size), raw, SERVERS_CACHE_MAX)
+        srv = json.loads(raw)
+        recs = sorted((r for r in srv.get("records", []) if r.get("leaf_index", size) < size), key=lambda r: r["leaf_index"])
+        if not recs:
+            return {"ok": True, "server_id": server_id, "state": "UNKNOWN", "reason": "no record covered by the signed head yet",
+                    "log_tree_size": size, "claim_boundary": CLAIM_BOUNDARY_CHECK}
+        changed = [r for r in recs if (r.get("change") or {}).get("kind") != "initial"]
+        last = recs[-1]
+        return {"ok": True, "server_id": server_id, "state": "OBSERVED",
+                "fingerprint_history": [{"leaf_index": r["leaf_index"], "observed_at": r.get("observed_at"),
+                                         "kind": (r.get("change") or {}).get("kind"), "tools_sha256": r.get("tools_sha256")} for r in recs[-50:]],
+                "history_total": len(recs),
+                "last_change": None if not changed else {"leaf_index": changed[-1]["leaf_index"], "observed_at": changed[-1].get("observed_at"),
+                                                         "before_tools_sha256": next((r.get("tools_sha256") for r in reversed(recs) if r["leaf_index"] < changed[-1]["leaf_index"]), None),
+                                                         "before_observed_at": next((r.get("observed_at") for r in reversed(recs) if r["leaf_index"] < changed[-1]["leaf_index"]), None),
+                                                         "after_tools_sha256": changed[-1].get("tools_sha256"),
+                                                         "diff_url": "%s/diff/%d" % (BASE, changed[-1]["leaf_index"]),
+                                                         "added": (changed[-1].get("change") or {}).get("added", [])[:50],
+                                                         "removed": (changed[-1].get("change") or {}).get("removed", [])[:50],
+                                                         "modified": (changed[-1].get("change") or {}).get("modified", [])[:50]},
+                "coverage": _coverage(server_id),
+                "proof": {"log_tree_size": size, "root_sha256": sth["tree_head"]["root_sha256"], "latest_leaf_index": last["leaf_index"],
+                          "record_url": "%s/records/%d" % (BASE, last["leaf_index"]),
+                          "inclusion_proof_url": "%s/proof/inclusion?leaf_index=%d&tree_size=%d" % (BASE, last["leaf_index"], size),
+                          "signed_head_url": BASE + "/head"},
+                "verify_offline": KIT % server_id,
+                "references": REFERENCES, "references_note": REFERENCES_NOTE,
+                "claim_state": "observed_by_legion", "claim_boundary": CLAIM_BOUNDARY_CHECK}
     except ToolFail as e:
         return _err(e.code, e.message)
     except Exception as e:
